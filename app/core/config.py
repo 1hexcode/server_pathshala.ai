@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     # Environment
     DEBUG: bool = False
+    PRODUCTION: bool = False
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/patshala"

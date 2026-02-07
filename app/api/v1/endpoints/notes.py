@@ -190,16 +190,11 @@ async def delete_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    # Delete file from Supabase Storage
+    # Delete file from storage
     if note.file_url:
         try:
-            # Extract the storage path from the public URL
-            # Public URL: https://xxx.supabase.co/storage/v1/object/public/notes/ISC/BSc/CS20/uuid.pdf
-            # We need: ISC/BSc/CS20/uuid.pdf
-            marker = f"/object/public/{settings.SUPABASE_BUCKET}/"
-            if marker in note.file_url:
-                storage_path = note.file_url.split(marker, 1)[1]
-                await storage_service.delete(storage_path)
+            storage_path = storage_service.extract_storage_path(note.file_url)
+            await storage_service.delete(storage_path)
         except Exception as e:
             logger.warning(f"Failed to delete file from storage: {e}")
 

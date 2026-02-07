@@ -1,3 +1,4 @@
+import os
 import traceback
 
 from fastapi import FastAPI, Request
@@ -32,6 +33,15 @@ def create_application() -> FastAPI:
 
     # Include API router
     application.include_router(api_router, prefix=settings.API_V1_STR)
+
+    # Serve uploaded files locally in dev mode only
+    if not settings.PRODUCTION:
+        from fastapi.staticfiles import StaticFiles
+
+        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        application.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+        logger.info(f"Dev mode: serving uploads from {uploads_dir}")
 
     # Register exception handlers
     register_exception_handlers(application)

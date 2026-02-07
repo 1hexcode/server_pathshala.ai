@@ -31,21 +31,9 @@ class ChatResponse(BaseModel):
     model: str
 
 
-def _extract_storage_path(file_url: str) -> str:
-    """Extract the storage path from a Supabase public URL.
-
-    Public URL: https://xxx.supabase.co/storage/v1/object/public/notes/ISC/BSc/CS20/uuid.pdf
-    Returns:    ISC/BSc/CS20/uuid.pdf
-    """
-    marker = f"/object/public/{settings.SUPABASE_BUCKET}/"
-    if marker in file_url:
-        return file_url.split(marker, 1)[1]
-    # Fallback: treat as relative path
-    return file_url
-
-
-async def _download_and_extract_text(storage_path: str) -> str:
-    """Download a PDF from Supabase and extract its text content."""
+async def _download_and_extract_text(file_url: str) -> str:
+    """Download a file from storage and extract its text content."""
+    storage_path = storage_service.extract_storage_path(file_url)
     content = await storage_service.download(storage_path)
     raw_text = pdf_service.extract_text_from_pdf(content)
     cleaned = pdf_service.cleanup_text(raw_text)
@@ -75,11 +63,9 @@ async def chat_about_note(
     if not note.file_url:
         raise HTTPException(status_code=400, detail="This note has no uploaded file")
 
-    storage_path = _extract_storage_path(note.file_url)
-
     try:
         # Download and extract text from PDF
-        doc_text = await _download_and_extract_text(storage_path)
+        doc_text = await _download_and_extract_text(note.file_url)
         if not doc_text.strip():
             raise HTTPException(
                 status_code=400,
