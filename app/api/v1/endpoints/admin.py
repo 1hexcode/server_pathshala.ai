@@ -3,7 +3,7 @@
 from typing import List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,9 +46,17 @@ async def create_college(
 
 
 @router.get("/colleges", response_model=List[CollegeResponse])
-async def list_colleges(db: AsyncSession = Depends(get_db)):
-    """List all colleges (public)."""
-    result = await db.execute(select(College).order_by(College.name))
+async def list_colleges(
+    favourite: bool = Query(None, description="Filter favourite colleges only"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all colleges (public). Use ?favourite=true for featured colleges."""
+    query = select(College)
+    if favourite is not None:
+        query = query.where(College.is_favourite == favourite)
+    query = query.order_by(College.name)
+
+    result = await db.execute(query)
     return result.scalars().all()
 
 
@@ -59,6 +67,27 @@ async def get_college(college_id: UUID, db: AsyncSession = Depends(get_db)):
     college = result.scalar_one_or_none()
     if not college:
         raise HTTPException(status_code=404, detail="College not found")
+    return college
+
+
+@router.patch("/colleges/{college_id}/toggle-favourite", response_model=CollegeResponse)
+async def toggle_college_favourite(
+    college_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle favourite status of a college (admin+ only)."""
+    result = await db.execute(select(College).where(College.id == college_id))
+    college = result.scalar_one_or_none()
+    if not college:
+        raise HTTPException(status_code=404, detail="College not found")
+
+    college.is_favourite = not college.is_favourite
+    await db.flush()
+    await db.refresh(college)
+
+    status = "favourited" if college.is_favourite else "unfavourited"
+    logger.info(f"College {status} by {current_user.email}: {college.name}")
     return college
 
 
@@ -74,7 +103,16 @@ async def delete_college(
     if not college:
         raise HTTPException(status_code=404, detail="College not found")
 
-    await db.delete(college)
+    try:
+        await db.delete(college)
+        await db.flush()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete college '{college.name}' — it has programs linked to it. Delete the programs first.",
+        )
+
     logger.info(f"College deleted by {current_user.email}: {college.name}")
     return {"message": f"College '{college.name}' deleted"}
 
@@ -139,7 +177,16 @@ async def delete_program(
     if not program:
         raise HTTPException(status_code=404, detail="Program not found")
 
-    await db.delete(program)
+    try:
+        await db.delete(program)
+        await db.flush()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete program '{program.name}' — it has subjects linked to it. Delete the subjects first.",
+        )
+
     logger.info(f"Program deleted by {current_user.email}: {program.name}")
     return {"message": f"Program '{program.name}' deleted"}
 
@@ -212,6 +259,16 @@ async def delete_subject(
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
 
-    await db.delete(subject)
+    try:
+        await db.delete(subject)
+        await db.flush()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete subject '{subject.code}' — it has notes linked to it. Delete the notes first.",
+        )
+
     logger.info(f"Subject deleted by {current_user.email}: {subject.code}")
     return {"message": f"Subject '{subject.code}' deleted"}
+

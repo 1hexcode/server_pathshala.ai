@@ -59,6 +59,7 @@ class CollegeCreate(BaseModel):
     short_name: str
     description: Optional[str] = None
     icon: Optional[str] = None
+    is_favourite: bool = False
 
 
 class CollegeResponse(BaseModel):
@@ -67,6 +68,7 @@ class CollegeResponse(BaseModel):
     short_name: str
     description: Optional[str] = None
     icon: Optional[str] = None
+    is_favourite: bool = False
     created_at: datetime
 
     class Config:
@@ -140,3 +142,12 @@ class NoteResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ─── Stats ───────────────────────────────────────────────────────────────────
+
+class StatsResponse(BaseModel):
+    notes_count: int
+    students_count: int
+    subjects_count: int
+    ai_responses_count: int

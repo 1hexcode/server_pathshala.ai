@@ -1,8 +1,10 @@
+import os
 import traceback
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -32,6 +34,11 @@ def create_application() -> FastAPI:
 
     # Include API router
     application.include_router(api_router, prefix=settings.API_V1_STR)
+
+    # Serve uploaded files
+    uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    application.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
     # Register exception handlers
     register_exception_handlers(application)
