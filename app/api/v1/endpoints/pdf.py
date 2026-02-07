@@ -12,65 +12,6 @@ from app.services.summarization_service import summarization_service
 router = APIRouter()
 
 
-@router.post("/extract")
-async def extract_text_from_pdf(file: UploadFile = File(...)):
-    """
-    Upload a PDF file and extract text from it.
-
-    - Extracts all text from the PDF
-    - Cleans up the extracted text
-    - Saves the cleaned text to a file
-    - Returns the file path and text preview
-    """
-    # Validate file type
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid file type. Only PDF files are accepted.",
-        )
-
-    # Validate content type
-    if file.content_type not in ["application/pdf", "application/octet-stream"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid content type: {file.content_type}. Expected application/pdf.",
-        )
-
-    try:
-        # Read file content
-        content = await file.read()
-
-        if len(content) == 0:
-            raise HTTPException(status_code=400, detail="Empty file uploaded.")
-
-        logger.info(f"Processing PDF: {file.filename} ({len(content)} bytes)")
-
-        # Process PDF
-        result = pdf_service.process_pdf(content, file.filename)
-
-        logger.info(f"PDF processed successfully: {result['output_path']}")
-
-        return {
-            "success": True,
-            "message": "PDF processed successfully",
-            "data": result,
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        # Log detailed error to console
-        logger.error(f"PDF processing failed for '{file.filename}': {e}")
-        if settings.DEBUG:
-            logger.error(f"Traceback:\n{traceback.format_exc()}")
-
-        raise HTTPException(
-            status_code=500,
-            detail="Error processing PDF. Check server logs for details.",
-        )
-
-
 @router.post("/summarize")
 async def summarize_pdf(
     file: UploadFile = File(...),
