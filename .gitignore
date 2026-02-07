@@ -87,3 +87,4 @@ dmypy.json
 
 # Generated output
 extracted_texts/
+uploads/
