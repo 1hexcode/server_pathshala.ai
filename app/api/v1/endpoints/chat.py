@@ -14,6 +14,7 @@ from app.core.logging import logger
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.note import Note
+from app.models.ai_chat_log import AIChatLog
 from app.services.pdf_service import pdf_service
 from app.services.summarization_service import summarization_service
 from app.services.storage_service import storage_service
@@ -116,6 +117,15 @@ async def chat_about_note(
             f"Chat response for note '{note.title}' by {current_user.email} "
             f"({len(response_text)} chars)"
         )
+
+        # Log the AI interaction
+        chat_log = AIChatLog(
+            user_id=current_user.id,
+            note_id=note.id,
+            question=body.message,
+            platform=platform,
+        )
+        db.add(chat_log)
 
         return ChatResponse(
             response=response_text.strip(),
