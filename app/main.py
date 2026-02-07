@@ -88,7 +88,14 @@ async def startup_event():
     from app.core.database import engine, Base
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.run_sync(Base.metadata.create_all)
+        except Exception as e:
+            # Ignore "already exists" errors (e.g. ENUM types on restart)
+            if "already exists" in str(e):
+                logger.warning(f"Some DB objects already exist (safe to ignore): {e}")
+            else:
+                raise
 
     logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}")
     logger.info("Documentation: http://127.0.0.1:8000/docs")
