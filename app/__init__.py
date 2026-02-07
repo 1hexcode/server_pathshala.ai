@@ -1,0 +1,2 @@
+# Patshal.ai - FastAPI Application
+
