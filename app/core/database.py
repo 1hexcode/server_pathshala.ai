@@ -5,9 +5,11 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+# asyncpg doesn't understand ?sslmode=require, it needs ?ssl=require
+db_url = settings.DATABASE_URL.replace("?sslmode=require", "?ssl=require")
 
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    db_url,
     echo=settings.DEBUG,
     pool_pre_ping=True,
 )
