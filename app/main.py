@@ -75,10 +75,18 @@ app = create_application()
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup information."""
+    """Initialize database and log startup information."""
+    # Import models so they register with Base.metadata
+    import app.models  # noqa: F401
+    from app.core.database import engine, Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}")
     logger.info("Documentation: http://127.0.0.1:8000/docs")
     logger.info("ReDoc: http://127.0.0.1:8000/redoc")
+    logger.info("Database connected & tables created")
     if settings.DEBUG:
         logger.warning("DEBUG mode is ON - detailed errors will be logged to console")
 
