@@ -1,6 +1,5 @@
 """Note-specific AI chat endpoint."""
 
-import os
 import traceback
 from typing import Optional
 
@@ -17,15 +16,9 @@ from app.models.user import User
 from app.models.note import Note
 from app.services.pdf_service import pdf_service
 from app.services.summarization_service import summarization_service
+from app.services.storage_service import storage_service
 
 router = APIRouter()
-
-
-# ─── Upload root (must match main.py's StaticFiles mount → server/uploads/) ──
-UPLOAD_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))),
-    "uploads",
-)
 
 
 class ChatRequest(BaseModel):
@@ -38,17 +31,22 @@ class ChatResponse(BaseModel):
     model: str
 
 
-def _resolve_file_path(file_url: str) -> str:
-    """Convert a /uploads/... URL to an absolute file path."""
-    rel_path = file_url.replace("/uploads/", "", 1)
-    return os.path.join(UPLOAD_ROOT, rel_path)
+def _extract_storage_path(file_url: str) -> str:
+    """Extract the storage path from a Supabase public URL.
+
+    Public URL: https://xxx.supabase.co/storage/v1/object/public/notes/ISC/BSc/CS20/uuid.pdf
+    Returns:    ISC/BSc/CS20/uuid.pdf
+    """
+    marker = f"/object/public/{settings.SUPABASE_BUCKET}/"
+    if marker in file_url:
+        return file_url.split(marker, 1)[1]
+    # Fallback: treat as relative path
+    return file_url
 
 
-def _extract_pdf_text(file_path: str) -> str:
-    """Read a PDF file and extract its text content."""
-    with open(file_path, "rb") as f:
-        content = f.read()
-
+async def _download_and_extract_text(storage_path: str) -> str:
+    """Download a PDF from Supabase and extract its text content."""
+    content = await storage_service.download(storage_path)
     raw_text = pdf_service.extract_text_from_pdf(content)
     cleaned = pdf_service.cleanup_text(raw_text)
     return cleaned
@@ -64,8 +62,8 @@ async def chat_about_note(
     """
     Ask an AI question about a specific note.
 
-    Extracts text from the note's PDF, sends it as context along with
-    the user's question to the LLM, and returns the answer.
+    Downloads the PDF from Supabase Storage, extracts text, sends it as context
+    along with the user's question to the LLM, and returns the answer.
     """
     # Validate note exists
     result = await db.execute(select(Note).where(Note.id == note_id))
@@ -77,16 +75,11 @@ async def chat_about_note(
     if not note.file_url:
         raise HTTPException(status_code=400, detail="This note has no uploaded file")
 
-    file_path = _resolve_file_path(note.file_url)
-    if not os.path.exists(file_path):
-        raise HTTPException(
-            status_code=404,
-            detail="Note file not found on disk. It may need to be re-uploaded.",
-        )
+    storage_path = _extract_storage_path(note.file_url)
 
     try:
-        # Extract text from PDF
-        doc_text = _extract_pdf_text(file_path)
+        # Download and extract text from PDF
+        doc_text = await _download_and_extract_text(storage_path)
         if not doc_text.strip():
             raise HTTPException(
                 status_code=400,

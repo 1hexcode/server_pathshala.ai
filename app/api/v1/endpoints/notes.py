@@ -1,7 +1,6 @@
 """Note management endpoints (upload, list, get, delete)."""
 
 import os
-import shutil
 import uuid
 from typing import List, Optional
 
@@ -19,28 +18,31 @@ from app.models.subject import Subject
 from app.models.program import Program
 from app.models.college import College
 from app.schemas import NoteResponse
+from app.services.storage_service import storage_service
+from app.core.config import settings
 
 router = APIRouter()
 
-# Upload root — must match the StaticFiles mount in main.py (server/uploads/)
-# __file__ = server/app/api/v1/endpoints/notes.py
-#   dirname x5 → server/
-UPLOAD_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))),
-    "uploads",
-)
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
+
+# ─── Content-type mapping ────────────────────────────────────────────────────
+MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
 
 
 def _sanitize(name: str) -> str:
-    """Sanitize a name for use in a directory path (remove spaces and special chars)."""
+    """Sanitize a name for use in a storage path (remove spaces and special chars)."""
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_")
 
 
-async def _build_upload_path(db: AsyncSession, subject: Subject) -> str:
+async def _build_storage_path(db: AsyncSession, subject: Subject) -> str:
     """
-    Build a hierarchical upload path: {college_short}/{program_short}/{subject_code}/
-    This maps directly to S3 key prefixes for future migration.
+    Build a hierarchical storage path: {college_short}/{program_short}/{subject_code}/
+    This maps directly to Supabase Storage object paths.
     """
     # Load program → college chain
     prog_result = await db.execute(
@@ -57,16 +59,11 @@ async def _build_upload_path(db: AsyncSession, subject: Subject) -> str:
     if not college:
         raise HTTPException(status_code=500, detail="Program's college not found")
 
-    # Build path: uploads/{COE}/{BCE}/{CS201}/
     college_dir = _sanitize(college.short_name)
     program_dir = _sanitize(program.short_name)
     subject_dir = _sanitize(subject.code)
 
-    rel_path = os.path.join(college_dir, program_dir, subject_dir)
-    full_dir = os.path.join(UPLOAD_ROOT, rel_path)
-    os.makedirs(full_dir, exist_ok=True)
-
-    return rel_path
+    return f"{college_dir}/{program_dir}/{subject_dir}"
 
 
 @router.post("/upload", response_model=NoteResponse)
@@ -81,7 +78,7 @@ async def upload_note(
 ):
     """Upload a note file (admin+ only)."""
     # Validate file type
-    allowed_types = [".pdf", ".doc", ".docx", ".ppt", ".pptx"]
+    allowed_types = list(MIME_TYPES.keys())
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in allowed_types:
         raise HTTPException(
@@ -105,23 +102,24 @@ async def upload_note(
         raise HTTPException(status_code=400, detail="File exceeds 50MB limit")
 
     # Build hierarchical path: {college}/{program}/{subject_code}/
-    rel_dir = await _build_upload_path(db, subject)
+    rel_dir = await _build_storage_path(db, subject)
 
-    # Save file to disk
+    # Upload to Supabase Storage
     file_id = str(uuid.uuid4())
     safe_filename = f"{file_id}{ext}"
-    file_path = os.path.join(UPLOAD_ROOT, rel_dir, safe_filename)
+    storage_path = f"{rel_dir}/{safe_filename}"
 
-    with open(file_path, "wb") as f:
-        f.write(content)
+    try:
+        file_url = await storage_service.upload(
+            storage_path, content, MIME_TYPES.get(ext, "application/octet-stream")
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
     # Parse tags
     tag_list = None
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-
-    # Store the file_url relative to uploads mount
-    file_url = f"/uploads/{rel_dir}/{safe_filename}"
 
     # Create note record
     note = Note(
@@ -192,14 +190,18 @@ async def delete_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    # Delete file from disk (handles nested paths)
+    # Delete file from Supabase Storage
     if note.file_url:
-        # file_url looks like /uploads/COE/BCE/CS201/uuid.pdf
-        rel_path = note.file_url.replace("/uploads/", "", 1)
-        file_path = os.path.join(UPLOAD_ROOT, rel_path)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Deleted file: {file_path}")
+        try:
+            # Extract the storage path from the public URL
+            # Public URL: https://xxx.supabase.co/storage/v1/object/public/notes/ISC/BSc/CS20/uuid.pdf
+            # We need: ISC/BSc/CS20/uuid.pdf
+            marker = f"/object/public/{settings.SUPABASE_BUCKET}/"
+            if marker in note.file_url:
+                storage_path = note.file_url.split(marker, 1)[1]
+                await storage_service.delete(storage_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete file from storage: {e}")
 
     await db.delete(note)
     logger.info(f"Note deleted by {current_user.email}: {note.title}")

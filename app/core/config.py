@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # Default platform
     DEFAULT_LLM_PLATFORM: str = "groq"
 
+    # Supabase Storage
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    SUPABASE_BUCKET: str = "notes"
+
     class Config:
         env_file = ".env"
         case_sensitive = True
