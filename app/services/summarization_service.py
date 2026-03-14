@@ -31,7 +31,7 @@ class SummarizationService:
     """Service for summarizing text via LLM APIs (Groq, OpenRouter, etc.)."""
 
     def _get_platform_config(self, platform: str) -> dict:
-        """Get URL, API key, and model for the given platform."""
+        """Get URL, API key, and model for the given platform (env-var fallback)."""
         if platform not in PLATFORMS:
             raise ValueError(
                 f"Unknown platform '{platform}'. "
@@ -53,6 +53,42 @@ class SummarizationService:
             "api_key": api_key,
             "model": model,
         }
+
+    async def get_active_model(self, db) -> dict:
+        """
+        Get the highest-priority enabled model from DB.
+        Falls back to env-var config if no DB models exist.
+        Returns dict with keys: url, api_key, model, platform, display_name.
+        """
+        from sqlalchemy import select
+        from app.models.llm_model import LLMModel
+
+        result = await db.execute(
+            select(LLMModel)
+            .where(LLMModel.is_enabled == True)
+            .order_by(LLMModel.priority, LLMModel.created_at)
+            .limit(1)
+        )
+        model = result.scalar_one_or_none()
+
+        if model:
+            platform_url = PLATFORMS.get(model.platform, {}).get("url")
+            if not platform_url:
+                raise ValueError(f"Unknown platform '{model.platform}'")
+            return {
+                "url": platform_url,
+                "api_key": model.api_key,
+                "model": model.model_id,
+                "platform": model.platform,
+                "display_name": model.display_name,
+            }
+
+        # Fallback to env-var config
+        platform = settings.DEFAULT_LLM_PLATFORM
+        config = self._get_platform_config(platform)
+        config["platform"] = platform
+        config["display_name"] = f"{platform}/{config['model']}"
+        return config
 
     def _build_payload(self, text: str, model: str, prompt: Optional[str] = None) -> dict:
         """Build the chat completion request payload."""
@@ -158,8 +194,6 @@ class SummarizationService:
             summary = await self._call_llm(config["url"], config["api_key"], payload)
             return {
                 "summary": summary.strip(),
-                "platform": platform,
-                "model": config["model"],
                 "chunks_processed": 1,
             }
 
@@ -183,8 +217,6 @@ class SummarizationService:
 
         return {
             "summary": final_summary.strip(),
-            "platform": platform,
-            "model": config["model"],
             "chunks_processed": len(chunks),
         }
 

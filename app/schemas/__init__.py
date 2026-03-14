@@ -135,6 +135,7 @@ class NoteResponse(BaseModel):
     file_size: Optional[int] = None
     page_count: Optional[int] = None
     status: str
+    is_handwritten: bool = False
     downloads: int
     views: int
     tags: Optional[List[str]] = None
@@ -150,4 +151,35 @@ class StatsResponse(BaseModel):
     notes_count: int
     students_count: int
     subjects_count: int
+    colleges_count: int
     ai_responses_count: int
+
+
+# ─── LLM Models ──────────────────────────────────────────────────────────────
+
+class LLMModelCreate(BaseModel):
+    platform: str  # "groq" or "openrouter"
+    model_id: str
+    display_name: str
+    api_key: str
+    is_enabled: bool = True
+    priority: int = 0
+
+class LLMModelUpdate(BaseModel):
+    display_name: Optional[str] = None
+    model_id: Optional[str] = None
+    api_key: Optional[str] = None
+    priority: Optional[int] = None
+
+class LLMModelResponse(BaseModel):
+    id: UUID
+    platform: str
+    model_id: str
+    display_name: str
+    is_enabled: bool
+    priority: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+

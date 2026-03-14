@@ -7,5 +7,7 @@ from app.models.subject import Subject
 from app.models.note import Note
 from app.models.summary import Summary
 from app.models.ai_chat_log import AIChatLog
+from app.models.llm_model import LLMModel
 
-__all__ = ["User", "College", "Program", "Subject", "Note", "Summary", "AIChatLog"]
+__all__ = ["User", "College", "Program", "Subject", "Note", "Summary", "AIChatLog", "LLMModel"]
+
