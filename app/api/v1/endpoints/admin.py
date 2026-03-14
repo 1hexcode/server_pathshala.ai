@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.dependencies import require_admin
+from app.dependencies import require_admin, require_super_admin
 from app.models.user import User
 from app.models.college import College
 from app.models.program import Program
@@ -94,10 +94,10 @@ async def toggle_college_favourite(
 @router.delete("/colleges/{college_id}")
 async def delete_college(
     college_id: UUID,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a college (admin+ only)."""
+    """Delete a college (super admin only)."""
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
@@ -168,10 +168,10 @@ async def get_program(program_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.delete("/programs/{program_id}")
 async def delete_program(
     program_id: UUID,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a program (admin+ only)."""
+    """Delete a program (super admin only)."""
     result = await db.execute(select(Program).where(Program.id == program_id))
     program = result.scalar_one_or_none()
     if not program:
@@ -250,10 +250,10 @@ async def get_subject(subject_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.delete("/subjects/{subject_id}")
 async def delete_subject(
     subject_id: UUID,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a subject (admin+ only)."""
+    """Delete a subject (super admin only)."""
     result = await db.execute(select(Subject).where(Subject.id == subject_id))
     subject = result.scalar_one_or_none()
     if not subject:
