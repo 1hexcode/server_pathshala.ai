@@ -19,6 +19,7 @@ from app.models.program import Program
 from app.models.college import College
 from app.schemas import NoteResponse
 from app.services.storage_service import storage_service
+from app.services.ocr_service import ocr_service
 from app.core.config import settings
 
 router = APIRouter()
@@ -27,10 +28,6 @@ router = APIRouter()
 # ─── Content-type mapping ────────────────────────────────────────────────────
 MIME_TYPES = {
     ".pdf": "application/pdf",
-    ".doc": "application/msword",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".ppt": "application/vnd.ms-powerpoint",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 
@@ -73,10 +70,13 @@ async def upload_note(
     subject_id: str = Form(...),
     description: str = Form(None),
     tags: str = Form(None),
-    current_user: User = Depends(require_admin),
+    is_handwritten: str = Form("false"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload a note file (admin+ only)."""
+    """Upload a note file (any authenticated user). Note goes to 'pending' until published by super admin."""
+    handwritten = is_handwritten.lower() in ("true", "1", "yes")
+
     # Validate file type
     allowed_types = list(MIME_TYPES.keys())
     ext = os.path.splitext(file.filename)[1].lower()
@@ -121,6 +121,20 @@ async def upload_note(
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
 
+    # Run OCR for handwritten notes
+    extracted_text = None
+    if handwritten:
+        try:
+            logger.info(f"Running OCR on handwritten note: {title}")
+            extracted_text = ocr_service.ocr_pdf(content)
+            if not extracted_text.strip():
+                logger.warning(f"OCR produced no text for: {title}")
+                extracted_text = None
+        except Exception as e:
+            logger.error(f"OCR failed for '{title}': {e}")
+            # Continue upload even if OCR fails — text will be missing
+            extracted_text = None
+
     # Create note record
     note = Note(
         user_id=current_user.id,
@@ -129,15 +143,17 @@ async def upload_note(
         description=description or None,
         file_url=file_url,
         file_size=len(content),
-        status="ready",
+        status="pending",
         tags=tag_list,
+        is_handwritten=handwritten,
+        extracted_text=extracted_text,
     )
     db.add(note)
     await db.flush()
     await db.refresh(note)
 
     logger.info(
-        f"Note uploaded by {current_user.email}: {title} "
+        f"Note uploaded (pending review) by {current_user.email}: {title} "
         f"({len(content)} bytes) → {file_url}"
     )
     return note
@@ -161,6 +177,18 @@ async def list_notes(
     return result.scalars().all()
 
 
+@router.get("/pending", response_model=List[NoteResponse])
+async def list_pending_notes(
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all notes waiting for review (super admin only)."""
+    result = await db.execute(
+        select(Note).where(Note.status == "pending").order_by(Note.created_at.desc())
+    )
+    return result.scalars().all()
+
+
 @router.get("/{note_id}", response_model=NoteResponse)
 async def get_note(
     note_id: str,
@@ -172,8 +200,28 @@ async def get_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    # Increment view count
+    # Increment view count and persist immediately
     note.views = (note.views or 0) + 1
+    await db.commit()
+    await db.refresh(note)
+
+    return note
+
+
+@router.post("/{note_id}/download", response_model=NoteResponse)
+async def track_download(
+    note_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Increment download counter for a note (public). Call when a user downloads the file."""
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    note.downloads = (note.downloads or 0) + 1
+    await db.commit()
+    await db.refresh(note)
 
     return note
 
@@ -201,3 +249,87 @@ async def delete_note(
     await db.delete(note)
     logger.info(f"Note deleted by {current_user.email}: {note.title}")
     return {"message": f"Note '{note.title}' deleted"}
+
+
+@router.post("/{note_id}/reprocess-ocr", response_model=NoteResponse)
+async def reprocess_ocr(
+    note_id: str,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-run OCR on a handwritten note (admin+ only). Use when OCR failed during upload."""
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    if not note.is_handwritten:
+        raise HTTPException(status_code=400, detail="This note is not marked as handwritten")
+
+    if not note.file_url:
+        raise HTTPException(status_code=400, detail="This note has no uploaded file")
+
+    try:
+        # Download PDF from storage
+        storage_path = storage_service.extract_storage_path(note.file_url)
+        content = await storage_service.download(storage_path)
+
+        logger.info(f"Re-processing OCR for: {note.title}")
+        extracted_text = ocr_service.ocr_pdf(content)
+
+        if not extracted_text.strip():
+            raise HTTPException(
+                status_code=500,
+                detail="OCR produced no text. The service may still be unavailable.",
+            )
+
+        note.extracted_text = extracted_text
+        logger.info(f"OCR reprocess complete for '{note.title}': {len(extracted_text)} chars")
+        return note
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OCR reprocess failed for '{note.title}': {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"OCR reprocessing failed: {e}. The DeepSeek OCR service may be temporarily unavailable.",
+        )
+
+
+
+
+
+@router.patch("/{note_id}/publish", response_model=NoteResponse)
+async def publish_note(
+    note_id: str,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Publish a pending note, making it publicly visible (super admin only)."""
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    note.status = "ready"
+    logger.info(f"Note published by {current_user.email}: {note.title}")
+    return note
+
+
+@router.patch("/{note_id}/reject", response_model=NoteResponse)
+async def reject_note(
+    note_id: str,
+    current_user: User = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a pending note (super admin only)."""
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    note.status = "failed"
+    logger.info(f"Note rejected by {current_user.email}: {note.title}")
+    return note
+

@@ -2,7 +2,7 @@
 
 import traceback
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -15,20 +15,14 @@ router = APIRouter()
 @router.post("/summarize")
 async def summarize_pdf(
     file: UploadFile = File(...),
-    platform: str = Query(
-        default=None,
-        description="LLM platform to use: 'groq' or 'openrouter'. Defaults to server config.",
-    ),
 ):
     """
     Upload a PDF file and get an AI-generated summary.
 
     - Extracts text from the PDF
     - Cleans the extracted text
-    - Sends it to the chosen LLM platform for summarization
+    - Sends it to the active AI model for summarization
     - Returns the summary
-
-    **Platforms**: `groq` (default), `openrouter`
     """
     # Validate file type
     if not file.filename.lower().endswith(".pdf"):
@@ -63,8 +57,8 @@ async def summarize_pdf(
 
         logger.info(f"Extracted {len(cleaned_text)} chars, sending to LLM...")
 
-        # Step 2: Summarize via chosen platform
-        result = await summarization_service.summarize(cleaned_text, platform=platform)
+        # Step 2: Summarize via active model
+        result = await summarization_service.summarize(cleaned_text)
 
         logger.info("PDF summarized successfully")
 

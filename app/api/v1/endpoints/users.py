@@ -90,6 +90,53 @@ async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+@router.get("/me/dashboard")
+async def get_dashboard(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get dashboard data for the current user."""
+    from sqlalchemy import func
+    from app.models.note import Note
+    from app.schemas import NoteResponse
+
+    # User's notes
+    notes_result = await db.execute(
+        select(Note)
+        .where(Note.user_id == current_user.id)
+        .order_by(Note.created_at.desc())
+    )
+    notes = notes_result.scalars().all()
+
+    # Aggregates
+    total_downloads = sum(n.downloads for n in notes)
+    total_views = sum(n.views for n in notes)
+
+    # College / program names
+    college_name = None
+    program_name = None
+    if current_user.college_id:
+        from app.models.college import College
+        col = await db.execute(select(College).where(College.id == current_user.college_id))
+        college = col.scalar_one_or_none()
+        college_name = college.short_name if college else None
+    if current_user.program_id:
+        from app.models.program import Program
+        prog = await db.execute(select(Program).where(Program.id == current_user.program_id))
+        program = prog.scalar_one_or_none()
+        program_name = program.name if program else None
+
+    return {
+        "notes_count": len(notes),
+        "total_downloads": total_downloads,
+        "total_views": total_views,
+        "college_name": college_name,
+        "program_name": program_name,
+        "semester": current_user.semester,
+        "recent_notes": [NoteResponse.model_validate(n) for n in notes[:5]],
+    }
+
+
 @router.post("/create-admin", response_model=UserResponse)
 async def create_admin(
     data: UserCreate,

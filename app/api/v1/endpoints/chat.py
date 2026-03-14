@@ -28,8 +28,6 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    platform: str
-    model: str
 
 
 async def _download_and_extract_text(file_url: str) -> str:
@@ -65,8 +63,23 @@ async def chat_about_note(
         raise HTTPException(status_code=400, detail="This note has no uploaded file")
 
     try:
-        # Download and extract text from PDF
-        doc_text = await _download_and_extract_text(note.file_url)
+        # Use stored OCR text for handwritten notes, otherwise extract from PDF
+        if note.is_handwritten and note.extracted_text:
+            logger.info(f"Using stored OCR text for handwritten note: {note.title}")
+            doc_text = note.extracted_text
+        elif note.is_handwritten and not note.extracted_text:
+            # OCR failed during upload — no text available
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "OCR text is not available for this handwritten note. "
+                    "The OCR service may have been unavailable during upload. "
+                    "Please try re-processing this note."
+                ),
+            )
+        else:
+            doc_text = await _download_and_extract_text(note.file_url)
+
         if not doc_text.strip():
             raise HTTPException(
                 status_code=400,
@@ -88,9 +101,8 @@ async def chat_about_note(
             f"Question: {body.message}"
         )
 
-        # Use the existing summarization service's LLM calling infrastructure
-        platform = settings.DEFAULT_LLM_PLATFORM
-        config = summarization_service._get_platform_config(platform)
+        # Get active model from DB (falls back to env-var config)
+        config = await summarization_service.get_active_model(db)
 
         payload = {
             "model": config["model"],
@@ -115,7 +127,7 @@ async def chat_about_note(
 
         logger.info(
             f"Chat response for note '{note.title}' by {current_user.email} "
-            f"({len(response_text)} chars)"
+            f"via {config.get('display_name', 'unknown')} ({len(response_text)} chars)"
         )
 
         # Log the AI interaction
@@ -123,25 +135,21 @@ async def chat_about_note(
             user_id=current_user.id,
             note_id=note.id,
             question=body.message,
-            platform=platform,
+            platform=config.get("platform", "unknown"),
         )
         db.add(chat_log)
 
         return ChatResponse(
             response=response_text.strip(),
-            platform=platform,
-            model=config["model"],
         )
 
     except HTTPException:
         raise
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Chat failed for note {note_id}: {e}")
         if settings.DEBUG:
             logger.error(f"Traceback:\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
-            detail="Error processing your question. Please try again.",
+            detail="Something went wrong. Please try again later.",
         )
