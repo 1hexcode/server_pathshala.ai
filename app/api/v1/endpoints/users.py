@@ -19,7 +19,7 @@ from app.dependencies import (
     require_admin,
 )
 from app.models.user import User
-from app.schemas import UserCreate, UserLogin, UserResponse, TokenResponse
+from app.schemas import UserCreate, UserLogin, UserUpdate, UserResponse, TokenResponse
 
 router = APIRouter()
 
@@ -87,6 +87,31 @@ async def login_user(
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user profile (requires token)."""
+    return current_user
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_me(
+    data: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update current user's name and/or password."""
+    if data.name is not None:
+        current_user.name = data.name.strip()
+
+    if data.new_password is not None:
+        if not data.current_password:
+            raise HTTPException(status_code=400, detail="Current password is required to set a new password")
+        if not verify_password(data.current_password, current_user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        if len(data.new_password) < 8:
+            raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+        current_user.password_hash = hash_password(data.new_password)
+
+    await db.commit()
+    await db.refresh(current_user)
+    logger.info(f"Profile updated for: {current_user.email}")
     return current_user
 
 
@@ -174,18 +199,24 @@ async def toggle_user_active(
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Enable or disable an admin user (super_admin only)."""
+    """Enable or disable an admin user (super_admin only). For students, use /admin/students/{id}/toggle-active."""
     result = await db.execute(select(User).where(User.id == user_id))
     target = result.scalar_one_or_none()
 
     if not target:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="User not found.")
 
     if target.role == "super_admin":
-        raise HTTPException(status_code=403, detail="Cannot disable a super admin")
+        raise HTTPException(status_code=403, detail="Cannot disable a super admin account.")
+
+    if target.role == "student":
+        raise HTTPException(
+            status_code=403,
+            detail="Student accounts are managed via the Students tab. Use /admin/students/{id}/toggle-active.",
+        )
 
     if target.id == current_user.id:
-        raise HTTPException(status_code=400, detail="Cannot disable yourself")
+        raise HTTPException(status_code=400, detail="You cannot disable your own account.")
 
     target.is_active = not target.is_active
     await db.flush()
@@ -203,11 +234,15 @@ async def list_users(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all users (admin+ only)."""
+    """List users. Admins see only students in their college; super_admin sees all."""
     query = select(User)
     if role:
         query = query.where(User.role == role)
-    query = query.order_by(User.created_at.desc())
 
+    # Regular admins are scoped to their own college's users
+    if current_user.role == "admin":
+        query = query.where(User.college_id == current_user.college_id)
+
+    query = query.order_by(User.created_at.desc())
     result = await db.execute(query)
     return result.scalars().all()

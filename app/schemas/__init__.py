@@ -20,9 +20,25 @@ class UserCreate(BaseModel):
     semester: Optional[int] = None
 
 
+class StudentCreate(BaseModel):
+    """Schema for admin-created student accounts. Role is always 'student'."""
+    email: str
+    name: str
+    password: str
+    program_id: Optional[UUID] = None
+    year: Optional[int] = None
+    semester: Optional[int] = None
+
+
 class UserLogin(BaseModel):
     email: str
     password: str
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
 
 
 class TokenResponse(BaseModel):

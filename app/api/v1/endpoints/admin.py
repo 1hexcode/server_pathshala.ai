@@ -1,4 +1,4 @@
-"""Admin endpoints for managing colleges, programs, and subjects."""
+"""Admin endpoints for managing colleges, programs, subjects, and students."""
 
 from typing import List
 from uuid import UUID
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.dependencies import require_admin, require_super_admin
+from app.dependencies import require_admin, require_super_admin, hash_password
 from app.models.user import User
 from app.models.college import College
 from app.models.program import Program
@@ -18,6 +18,7 @@ from app.schemas import (
     CollegeCreate, CollegeResponse,
     ProgramCreate, ProgramResponse,
     SubjectCreate, SubjectResponse,
+    StudentCreate, UserResponse,
 )
 
 router = APIRouter()
@@ -31,15 +32,27 @@ async def create_college(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new college (admin+ only)."""
+    """Create a new college. Regular admins can only create one college ever."""
+    # Enforce one-college-per-admin (super_admin is exempt)
+    if current_user.role == "admin" and current_user.college_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="You have already registered a college. An admin account can only manage one college.",
+        )
+
     existing = await db.execute(select(College).where(College.name == data.name))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="College already exists")
+        raise HTTPException(status_code=409, detail="A college with this name already exists.")
 
     college = College(**data.model_dump())
     db.add(college)
     await db.flush()
     await db.refresh(college)
+
+    # Link the admin to their newly created college
+    if current_user.role == "admin":
+        current_user.college_id = college.id
+        await db.flush()
 
     logger.info(f"College created by {current_user.email}: {college.name}")
     return college
@@ -66,7 +79,7 @@ async def get_college(college_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
-        raise HTTPException(status_code=404, detail="College not found")
+        raise HTTPException(status_code=404, detail="College not found.")
     return college
 
 
@@ -80,7 +93,14 @@ async def toggle_college_favourite(
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
-        raise HTTPException(status_code=404, detail="College not found")
+        raise HTTPException(status_code=404, detail="College not found.")
+
+    # Regular admins can only toggle their own college
+    if current_user.role == "admin" and current_user.college_id != college_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only manage your own college.",
+        )
 
     college.is_favourite = not college.is_favourite
     await db.flush()
@@ -101,7 +121,7 @@ async def delete_college(
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
-        raise HTTPException(status_code=404, detail="College not found")
+        raise HTTPException(status_code=404, detail="College not found.")
 
     try:
         await db.delete(college)
@@ -125,11 +145,24 @@ async def create_program(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new program under a college (admin+ only)."""
+    """Create a new program under a college. Admins can only add to their own college."""
+    # Enforce scoping: admins can only add programs to their own college
+    if current_user.role == "admin":
+        if current_user.college_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You must create your college before adding programs.",
+            )
+        if data.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only add programs to your own college.",
+            )
+
     # Verify college exists
     college = await db.execute(select(College).where(College.id == data.college_id))
     if not college.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="College not found")
+        raise HTTPException(status_code=404, detail="College not found.")
 
     program = Program(**data.model_dump())
     db.add(program)
@@ -161,7 +194,7 @@ async def get_program(program_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Program).where(Program.id == program_id))
     program = result.scalar_one_or_none()
     if not program:
-        raise HTTPException(status_code=404, detail="Program not found")
+        raise HTTPException(status_code=404, detail="Program not found.")
     return program
 
 
@@ -175,7 +208,7 @@ async def delete_program(
     result = await db.execute(select(Program).where(Program.id == program_id))
     program = result.scalar_one_or_none()
     if not program:
-        raise HTTPException(status_code=404, detail="Program not found")
+        raise HTTPException(status_code=404, detail="Program not found.")
 
     try:
         await db.delete(program)
@@ -199,16 +232,30 @@ async def create_subject(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new subject under a program (admin+ only)."""
+    """Create a new subject under a program. Admins can only add subjects to their own college's programs."""
     # Verify program exists
-    program = await db.execute(select(Program).where(Program.id == data.program_id))
-    if not program.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Program not found")
+    prog_result = await db.execute(select(Program).where(Program.id == data.program_id))
+    program = prog_result.scalar_one_or_none()
+    if not program:
+        raise HTTPException(status_code=404, detail="Program not found.")
+
+    # Enforce scoping: admins can only add subjects to programs in their own college
+    if current_user.role == "admin":
+        if current_user.college_id is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You must create your college before adding subjects.",
+            )
+        if program.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only add subjects to programs in your own college.",
+            )
 
     # Check duplicate code
     existing = await db.execute(select(Subject).where(Subject.code == data.code))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail=f"Subject code '{data.code}' already exists")
+        raise HTTPException(status_code=409, detail=f"Subject code '{data.code}' already exists.")
 
     subject = Subject(**data.model_dump())
     db.add(subject)
@@ -243,7 +290,7 @@ async def get_subject(subject_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Subject).where(Subject.id == subject_id))
     subject = result.scalar_one_or_none()
     if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+        raise HTTPException(status_code=404, detail="Subject not found.")
     return subject
 
 
@@ -257,7 +304,7 @@ async def delete_subject(
     result = await db.execute(select(Subject).where(Subject.id == subject_id))
     subject = result.scalar_one_or_none()
     if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+        raise HTTPException(status_code=404, detail="Subject not found.")
 
     try:
         await db.delete(subject)
@@ -272,3 +319,114 @@ async def delete_subject(
     logger.info(f"Subject deleted by {current_user.email}: {subject.code}")
     return {"message": f"Subject '{subject.code}' deleted"}
 
+
+# ─── Students (Admin-created) ────────────────────────────────────────────────
+
+@router.post("/create-student", response_model=UserResponse)
+async def create_student(
+    data: StudentCreate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a student account (admin only). Student is auto-linked to the admin's college."""
+    if current_user.role == "super_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Super admins should use the /users/create-admin endpoint. Use 'Create Admin' flow.",
+        )
+
+    if current_user.college_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="You must create your college before adding students.",
+        )
+
+    # Validate program belongs to admin's college (if provided)
+    if data.program_id is not None:
+        prog_result = await db.execute(select(Program).where(Program.id == data.program_id))
+        program = prog_result.scalar_one_or_none()
+        if not program:
+            raise HTTPException(status_code=404, detail="Program not found.")
+        if program.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="The selected program does not belong to your college.",
+            )
+
+    existing = await db.execute(select(User).where(User.email == data.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A user with this email is already registered.")
+
+    student = User(
+        email=data.email,
+        name=data.name,
+        password_hash=hash_password(data.password),
+        role="student",
+        college_id=current_user.college_id,
+        program_id=data.program_id,
+        year=data.year,
+        semester=data.semester,
+    )
+    db.add(student)
+    await db.flush()
+    await db.refresh(student)
+
+    logger.info(f"Student created by {current_user.email}: {student.email}")
+    return student
+
+
+@router.get("/students", response_model=List[UserResponse])
+async def list_students(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List students. Admins see only their college's students; super_admin sees all."""
+    query = select(User).where(User.role == "student")
+
+    if current_user.role == "admin":
+        if current_user.college_id is None:
+            return []
+        query = query.where(User.college_id == current_user.college_id)
+
+    query = query.order_by(User.created_at.desc())
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@router.patch("/students/{user_id}/toggle-active", response_model=UserResponse)
+async def toggle_student_active(
+    user_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enable or disable a student. Admins can only manage students in their own college."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if target.role != "student":
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint only manages student accounts. Use the Admins tab for admin accounts.",
+        )
+
+    if target.id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot disable your own account.")
+
+    # Scope check: admins can only manage their own college's students
+    if current_user.role == "admin":
+        if current_user.college_id is None or target.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only manage students from your own college.",
+            )
+
+    target.is_active = not target.is_active
+    await db.flush()
+    await db.refresh(target)
+
+    status = "enabled" if target.is_active else "disabled"
+    logger.info(f"Student {status} by {current_user.email}: {target.email}")
+    return target
