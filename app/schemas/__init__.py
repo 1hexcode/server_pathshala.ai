@@ -30,6 +30,15 @@ class StudentCreate(BaseModel):
     semester: Optional[int] = None
 
 
+class AdminCreate(BaseModel):
+    """Schema for super_admin-created admin accounts. Includes optional college pre-assignment."""
+    email: str
+    name: str
+    password: str
+    role: str = "admin"
+    college_id: Optional[UUID] = None
+
+
 class UserLogin(BaseModel):
     email: str
     password: str
