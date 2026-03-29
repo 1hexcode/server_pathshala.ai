@@ -32,12 +32,12 @@ async def create_college(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new college. Regular admins can only create one college ever."""
-    # Enforce one-college-per-admin (super_admin is exempt)
-    if current_user.role == "admin" and current_user.college_id is not None:
+    """Create a new college. Only super_admin can create colleges directly.
+    Regular admins receive their college via the create-admin flow."""
+    if current_user.role == "admin":
         raise HTTPException(
-            status_code=409,
-            detail="You have already registered a college. An admin account can only manage one college.",
+            status_code=403,
+            detail="Admins cannot create colleges directly. Your college is assigned by a super admin.",
         )
 
     existing = await db.execute(select(College).where(College.name == data.name))
@@ -48,11 +48,6 @@ async def create_college(
     db.add(college)
     await db.flush()
     await db.refresh(college)
-
-    # Link the admin to their newly created college
-    if current_user.role == "admin":
-        current_user.college_id = college.id
-        await db.flush()
 
     logger.info(f"College created by {current_user.email}: {college.name}")
     return college

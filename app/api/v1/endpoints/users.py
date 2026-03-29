@@ -19,7 +19,7 @@ from app.dependencies import (
     require_admin,
 )
 from app.models.user import User
-from app.schemas import UserCreate, UserLogin, UserUpdate, UserResponse, TokenResponse
+from app.schemas import UserCreate, UserLogin, UserUpdate, UserResponse, TokenResponse, AdminCreate
 
 router = APIRouter()
 
@@ -164,32 +164,53 @@ async def get_dashboard(
 
 @router.post("/create-admin", response_model=UserResponse)
 async def create_admin(
-    data: UserCreate,
+    data: AdminCreate,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create an admin user (super_admin only)."""
+    """Create an admin user with an optional pre-assigned college (super_admin only)."""
     if data.role not in ("admin", "super_admin"):
         raise HTTPException(
             status_code=400,
-            detail="This endpoint is for creating admin or super_admin users",
+            detail="This endpoint is for creating admin or super_admin users.",
         )
 
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    # Validate college if provided
+    college_id = None
+    if data.college_id:
+        from app.models.college import College
+        col_result = await db.execute(select(College).where(College.id == data.college_id))
+        college = col_result.scalar_one_or_none()
+        if not college:
+            raise HTTPException(status_code=404, detail="College not found.")
+        # Ensure no other admin is already assigned to this college
+        existing_admin = await db.execute(
+            select(User).where(User.college_id == data.college_id, User.role == "admin")
+        )
+        if existing_admin.scalar_one_or_none():
+            raise HTTPException(
+                status_code=409,
+                detail="Another admin is already assigned to this college. Each college can only have one admin.",
+            )
+        college_id = data.college_id
 
     user = User(
         email=data.email,
         name=data.name,
         password_hash=hash_password(data.password),
         role=data.role,
+        college_id=college_id,
     )
     db.add(user)
     await db.flush()
     await db.refresh(user)
 
-    logger.info(f"Admin created by {current_user.email}: {user.email} ({user.role})")
+    college_info = f" (college: {college_id})" if college_id else ""
+    logger.info(f"Admin created by {current_user.email}: {user.email} ({user.role}){college_info}")
     return user
 
 
