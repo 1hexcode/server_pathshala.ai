@@ -14,10 +14,10 @@ class UserCreate(BaseModel):
     name: str
     password: str
     role: str = "student"
-    college_id: Optional[UUID] = None
-    program_id: Optional[UUID] = None
-    year: Optional[int] = None
-    semester: Optional[int] = None
+    college_id: UUID
+    program_id: UUID
+    year: int
+    semester: int
 
 
 class StudentCreate(BaseModel):
@@ -25,9 +25,9 @@ class StudentCreate(BaseModel):
     email: str
     name: str
     password: str
-    program_id: Optional[UUID] = None
-    year: Optional[int] = None
-    semester: Optional[int] = None
+    program_id: UUID
+    year: int
+    semester: int
 
 
 class AdminCreate(BaseModel):
@@ -87,6 +87,14 @@ class CollegeCreate(BaseModel):
     is_favourite: bool = False
 
 
+class CollegeUpdate(BaseModel):
+    name: Optional[str] = None
+    short_name: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    is_favourite: Optional[bool] = None
+
+
 class CollegeResponse(BaseModel):
     id: UUID
     name: str
@@ -107,6 +115,14 @@ class ProgramCreate(BaseModel):
     name: str
     short_name: str
     duration: int = 4
+    description: Optional[str] = None
+    total_credits: int
+
+
+class ProgramUpdate(BaseModel):
+    name: Optional[str] = None
+    short_name: Optional[str] = None
+    duration: Optional[int] = None
     description: Optional[str] = None
     total_credits: Optional[int] = None
 
@@ -132,6 +148,14 @@ class SubjectCreate(BaseModel):
     name: str
     code: str
     credits: int = 3
+    description: Optional[str] = None
+
+
+class SubjectUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    semester: Optional[int] = None
+    credits: Optional[int] = None
     description: Optional[str] = None
 
 

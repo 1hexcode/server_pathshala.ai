@@ -4,7 +4,7 @@ from typing import List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, func, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -15,9 +15,9 @@ from app.models.college import College
 from app.models.program import Program
 from app.models.subject import Subject
 from app.schemas import (
-    CollegeCreate, CollegeResponse,
-    ProgramCreate, ProgramResponse,
-    SubjectCreate, SubjectResponse,
+    CollegeCreate, CollegeUpdate, CollegeResponse,
+    ProgramCreate, ProgramUpdate, ProgramResponse,
+    SubjectCreate, SubjectUpdate, SubjectResponse,
     StudentCreate, UserResponse,
 )
 
@@ -81,21 +81,14 @@ async def get_college(college_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.patch("/colleges/{college_id}/toggle-favourite", response_model=CollegeResponse)
 async def toggle_college_favourite(
     college_id: UUID,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Toggle favourite status of a college (admin+ only)."""
+    """Toggle favourite status of a college (super admin only)."""
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
         raise HTTPException(status_code=404, detail="College not found.")
-
-    # Regular admins can only toggle their own college
-    if current_user.role == "admin" and current_user.college_id != college_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only manage your own college.",
-        )
 
     college.is_favourite = not college.is_favourite
     await db.flush()
@@ -106,30 +99,74 @@ async def toggle_college_favourite(
     return college
 
 
+@router.put("/colleges/{college_id}", response_model=CollegeResponse)
+async def update_college(
+    college_id: UUID,
+    data: CollegeUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a college. Super admin can edit any college; admin can edit only their own."""
+    result = await db.execute(select(College).where(College.id == college_id))
+    college = result.scalar_one_or_none()
+    if not college:
+        raise HTTPException(status_code=404, detail="College not found.")
+
+    # Admin can only edit their own college
+    if current_user.role == "admin" and current_user.college_id != college_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only edit your own college.",
+        )
+
+    # Check name uniqueness if name is being changed
+    if data.name is not None and data.name != college.name:
+        existing = await db.execute(select(College).where(College.name == data.name))
+        if existing.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="A college with this name already exists.")
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(college, field, value)
+
+    await db.flush()
+    await db.refresh(college)
+
+    logger.info(f"College updated by {current_user.email}: {college.name}")
+    return college
+
+
 @router.delete("/colleges/{college_id}")
 async def delete_college(
     college_id: UUID,
     current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a college (super admin only)."""
+    """Delete a college and cascade-delete all associated programs, subjects, and users (super admin only)."""
     result = await db.execute(select(College).where(College.id == college_id))
     college = result.scalar_one_or_none()
     if not college:
         raise HTTPException(status_code=404, detail="College not found.")
 
-    try:
-        await db.delete(college)
-        await db.flush()
-    except Exception:
-        await db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot delete college '{college.name}' — it has programs linked to it. Delete the programs first.",
-        )
+    # 1. Delete subjects under all programs of this college
+    programs_result = await db.execute(select(Program).where(Program.college_id == college_id))
+    programs = programs_result.scalars().all()
+    program_ids = [p.id for p in programs]
+    if program_ids:
+        await db.execute(sa_delete(Subject).where(Subject.program_id.in_(program_ids)))
 
-    logger.info(f"College deleted by {current_user.email}: {college.name}")
-    return {"message": f"College '{college.name}' deleted"}
+    # 2. Delete all programs of this college
+    await db.execute(sa_delete(Program).where(Program.college_id == college_id))
+
+    # 3. Delete all users (admins + students) linked to this college
+    await db.execute(sa_delete(User).where(User.college_id == college_id))
+
+    # 4. Delete the college itself
+    await db.delete(college)
+    await db.flush()
+
+    logger.info(f"College cascade-deleted by {current_user.email}: {college.name}")
+    return {"message": f"College '{college.name}' and all associated data deleted"}
 
 
 # ─── Programs ────────────────────────────────────────────────────────────────
@@ -141,6 +178,10 @@ async def create_program(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new program under a college. Admins can only add to their own college."""
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Program name cannot be empty.")
+    if not data.short_name.strip():
+        raise HTTPException(status_code=400, detail="Program short name cannot be empty.")
     # Enforce scoping: admins can only add programs to their own college
     if current_user.role == "admin":
         if current_user.college_id is None:
@@ -193,30 +234,71 @@ async def get_program(program_id: UUID, db: AsyncSession = Depends(get_db)):
     return program
 
 
-@router.delete("/programs/{program_id}")
-async def delete_program(
+@router.put("/programs/{program_id}", response_model=ProgramResponse)
+async def update_program(
     program_id: UUID,
-    current_user: User = Depends(require_super_admin),
+    data: ProgramUpdate,
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a program (super admin only)."""
+    """Update a program. Super admin can edit any; admin can only edit programs under their college."""
     result = await db.execute(select(Program).where(Program.id == program_id))
     program = result.scalar_one_or_none()
     if not program:
         raise HTTPException(status_code=404, detail="Program not found.")
 
-    try:
-        await db.delete(program)
-        await db.flush()
-    except Exception:
-        await db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot delete program '{program.name}' — it has subjects linked to it. Delete the subjects first.",
-        )
+    if data.name is not None and not data.name.strip():
+        raise HTTPException(status_code=400, detail="Program name cannot be empty.")
+    if data.short_name is not None and not data.short_name.strip():
+        raise HTTPException(status_code=400, detail="Program short name cannot be empty.")
 
-    logger.info(f"Program deleted by {current_user.email}: {program.name}")
-    return {"message": f"Program '{program.name}' deleted"}
+    # Admin can only edit programs belonging to their college
+    if current_user.role == "admin":
+        if current_user.college_id is None or program.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only edit programs in your own college.",
+            )
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(program, field, value)
+
+    await db.flush()
+    await db.refresh(program)
+
+    logger.info(f"Program updated by {current_user.email}: {program.name}")
+    return program
+
+
+@router.delete("/programs/{program_id}")
+async def delete_program(
+    program_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a program and cascade-delete all its subjects. Admins can only delete programs in their college."""
+    result = await db.execute(select(Program).where(Program.id == program_id))
+    program = result.scalar_one_or_none()
+    if not program:
+        raise HTTPException(status_code=404, detail="Program not found.")
+
+    # Admin scoping: can only delete programs in their own college
+    if current_user.role == "admin":
+        if current_user.college_id is None or program.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete programs in your own college.",
+            )
+
+    # Cascade: delete all subjects under this program first
+    await db.execute(sa_delete(Subject).where(Subject.program_id == program_id))
+
+    await db.delete(program)
+    await db.flush()
+
+    logger.info(f"Program cascade-deleted by {current_user.email}: {program.name}")
+    return {"message": f"Program '{program.name}' and all its subjects deleted"}
 
 
 # ─── Subjects ────────────────────────────────────────────────────────────────
@@ -251,6 +333,28 @@ async def create_subject(
     existing = await db.execute(select(Subject).where(Subject.code == data.code))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Subject code '{data.code}' already exists.")
+
+    # Validate semester against program duration
+    max_semester = program.duration * 2
+    if data.semester < 1 or data.semester > max_semester:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Semester must be between 1 and {max_semester} for a {program.duration}-year program.",
+        )
+
+    # Validate total credits: sum of existing + new must not exceed program total_credits
+    if program.total_credits is not None:
+        sum_result = await db.execute(
+            select(func.coalesce(func.sum(Subject.credits), 0))
+            .where(Subject.program_id == data.program_id)
+        )
+        current_total = sum_result.scalar()
+        if current_total + data.credits > program.total_credits:
+            remaining = program.total_credits - current_total
+            raise HTTPException(
+                status_code=409,
+                detail=f"Adding {data.credits} credits would exceed the program's total credits limit ({program.total_credits}). Remaining capacity: {remaining} credits.",
+            )
 
     subject = Subject(**data.model_dump())
     db.add(subject)
@@ -289,17 +393,93 @@ async def get_subject(subject_id: UUID, db: AsyncSession = Depends(get_db)):
     return subject
 
 
-@router.delete("/subjects/{subject_id}")
-async def delete_subject(
+@router.put("/subjects/{subject_id}", response_model=SubjectResponse)
+async def update_subject(
     subject_id: UUID,
-    current_user: User = Depends(require_super_admin),
+    data: SubjectUpdate,
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a subject (super admin only)."""
+    """Update a subject. Super admin can edit any; admin can only edit subjects under their college's programs."""
     result = await db.execute(select(Subject).where(Subject.id == subject_id))
     subject = result.scalar_one_or_none()
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found.")
+
+    # Admin can only edit subjects belonging to their college's programs
+    if current_user.role == "admin":
+        prog_result = await db.execute(select(Program).where(Program.id == subject.program_id))
+        program = prog_result.scalar_one_or_none()
+        if current_user.college_id is None or (program and program.college_id != current_user.college_id):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only edit subjects in your own college's programs.",
+            )
+
+    # Check code uniqueness if code is being changed
+    if data.code is not None and data.code != subject.code:
+        existing = await db.execute(select(Subject).where(Subject.code == data.code))
+        if existing.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail=f"Subject code '{data.code}' already exists.")
+
+    # Validate semester against program duration if semester is being changed
+    prog_result2 = await db.execute(select(Program).where(Program.id == subject.program_id))
+    prog = prog_result2.scalar_one_or_none()
+    if prog and data.semester is not None:
+        max_semester = prog.duration * 2
+        if data.semester < 1 or data.semester > max_semester:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Semester must be between 1 and {max_semester} for a {prog.duration}-year program.",
+            )
+
+    # Validate total credits if credits are being changed
+    if prog and prog.total_credits is not None and data.credits is not None:
+        sum_result = await db.execute(
+            select(func.coalesce(func.sum(Subject.credits), 0))
+            .where(Subject.program_id == subject.program_id)
+            .where(Subject.id != subject.id)  # exclude current subject
+        )
+        current_total = sum_result.scalar()
+        if current_total + data.credits > prog.total_credits:
+            remaining = prog.total_credits - current_total
+            raise HTTPException(
+                status_code=409,
+                detail=f"Setting {data.credits} credits would exceed the program's total credits limit ({prog.total_credits}). Remaining capacity: {remaining} credits.",
+            )
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(subject, field, value)
+
+    await db.flush()
+    await db.refresh(subject)
+
+    logger.info(f"Subject updated by {current_user.email}: {subject.code} - {subject.name}")
+    return subject
+
+
+@router.delete("/subjects/{subject_id}")
+async def delete_subject(
+    subject_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a subject. Admins can only delete subjects in their college's programs."""
+    result = await db.execute(select(Subject).where(Subject.id == subject_id))
+    subject = result.scalar_one_or_none()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    # Admin scoping
+    if current_user.role == "admin":
+        prog_result = await db.execute(select(Program).where(Program.id == subject.program_id))
+        program = prog_result.scalar_one_or_none()
+        if current_user.college_id is None or (program and program.college_id != current_user.college_id):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete subjects in your own college's programs.",
+            )
 
     try:
         await db.delete(subject)
@@ -336,7 +516,14 @@ async def create_student(
             detail="You must create your college before adding students.",
         )
 
-    # Validate program belongs to admin's college (if provided)
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty.")
+    if not data.email.strip():
+        raise HTTPException(status_code=400, detail="Email cannot be empty.")
+    if not data.password.strip():
+        raise HTTPException(status_code=400, detail="Password cannot be empty.")
+
+    # Validate program belongs to admin's college and year/semester bounds
     if data.program_id is not None:
         prog_result = await db.execute(select(Program).where(Program.id == data.program_id))
         program = prog_result.scalar_one_or_none()
@@ -347,6 +534,23 @@ async def create_student(
                 status_code=403,
                 detail="The selected program does not belong to your college.",
             )
+        max_semester = program.duration * 2
+        if data.year is not None and data.year > program.duration:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Year cannot exceed {program.duration} for a {program.duration}-year program.",
+            )
+        if data.semester is not None and data.semester > max_semester:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Semester cannot exceed {max_semester} for a {program.duration}-year program.",
+            )
+
+    # Validate year and semester are positive
+    if data.year is not None and data.year < 1:
+        raise HTTPException(status_code=400, detail="Year must be at least 1.")
+    if data.semester is not None and data.semester < 1:
+        raise HTTPException(status_code=400, detail="Semester must be at least 1.")
 
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
@@ -425,3 +629,37 @@ async def toggle_student_active(
     status = "enabled" if target.is_active else "disabled"
     logger.info(f"Student {status} by {current_user.email}: {target.email}")
     return target
+
+
+@router.delete("/students/{user_id}")
+async def delete_student(
+    user_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a student. Admins can only delete students in their own college."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if target.role != "student":
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint only deletes student accounts.",
+        )
+
+    # Scope check: admins can only delete their own college's students
+    if current_user.role == "admin":
+        if current_user.college_id is None or target.college_id != current_user.college_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete students from your own college.",
+            )
+
+    await db.delete(target)
+    await db.flush()
+
+    logger.info(f"Student deleted by {current_user.email}: {target.email}")
+    return {"message": f"Student '{target.email}' deleted"}

@@ -179,13 +179,21 @@ async def list_notes(
 
 @router.get("/pending", response_model=List[NoteResponse])
 async def list_pending_notes(
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all notes waiting for review (super admin only)."""
-    result = await db.execute(
-        select(Note).where(Note.status == "pending").order_by(Note.created_at.desc())
-    )
+    """List all notes waiting for review. Admins only see notes for their college."""
+    query = select(Note).where(Note.status == "pending")
+
+    if current_user.role == "admin":
+        if current_user.college_id is None:
+            return []
+        query = query.join(Subject, Note.subject_id == Subject.id)\
+                     .join(Program, Subject.program_id == Program.id)\
+                     .where(Program.college_id == current_user.college_id)
+                     
+    query = query.order_by(Note.created_at.desc())
+    result = await db.execute(query)
     return result.scalars().all()
 
 
@@ -229,14 +237,20 @@ async def track_download(
 @router.delete("/{note_id}")
 async def delete_note(
     note_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a note (super_admin only)."""
+    """Delete a note. Admins can only delete notes in their college."""
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
+
+    if current_user.role == "admin":
+        prog_result = await db.execute(select(Program).join(Subject).where(Subject.id == note.subject_id))
+        program = prog_result.scalar_one_or_none()
+        if current_user.college_id is None or (program and program.college_id != current_user.college_id):
+            raise HTTPException(status_code=403, detail="You can only manage notes from your own college.")
 
     # Delete file from storage
     if note.file_url:
@@ -303,14 +317,20 @@ async def reprocess_ocr(
 @router.patch("/{note_id}/publish", response_model=NoteResponse)
 async def publish_note(
     note_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Publish a pending note, making it publicly visible (super admin only)."""
+    """Publish a pending note. Admins can only publish notes in their college."""
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
+
+    if current_user.role == "admin":
+        prog_result = await db.execute(select(Program).join(Subject).where(Subject.id == note.subject_id))
+        program = prog_result.scalar_one_or_none()
+        if current_user.college_id is None or (program and program.college_id != current_user.college_id):
+            raise HTTPException(status_code=403, detail="You can only manage notes from your own college.")
 
     note.status = "ready"
     logger.info(f"Note published by {current_user.email}: {note.title}")
@@ -320,14 +340,20 @@ async def publish_note(
 @router.patch("/{note_id}/reject", response_model=NoteResponse)
 async def reject_note(
     note_id: str,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reject a pending note (super admin only)."""
+    """Reject a pending note. Admins can only reject notes in their college."""
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
+
+    if current_user.role == "admin":
+        prog_result = await db.execute(select(Program).join(Subject).where(Subject.id == note.subject_id))
+        program = prog_result.scalar_one_or_none()
+        if current_user.college_id is None or (program and program.college_id != current_user.college_id):
+            raise HTTPException(status_code=403, detail="You can only manage notes from your own college.")
 
     note.status = "failed"
     logger.info(f"Note rejected by {current_user.email}: {note.title}")

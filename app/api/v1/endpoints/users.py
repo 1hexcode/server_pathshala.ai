@@ -187,15 +187,6 @@ async def create_admin(
         college = col_result.scalar_one_or_none()
         if not college:
             raise HTTPException(status_code=404, detail="College not found.")
-        # Ensure no other admin is already assigned to this college
-        existing_admin = await db.execute(
-            select(User).where(User.college_id == data.college_id, User.role == "admin")
-        )
-        if existing_admin.scalar_one_or_none():
-            raise HTTPException(
-                status_code=409,
-                detail="Another admin is already assigned to this college. Each college can only have one admin.",
-            )
         college_id = data.college_id
 
     user = User(
