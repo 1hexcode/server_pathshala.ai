@@ -38,7 +38,7 @@ class User(Base):
     last_login: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
     # Relationships
-    college = relationship("College", back_populates="users")
-    program = relationship("Program", back_populates="users")
+    college = relationship("College", back_populates="users", lazy="selectin")
+    program = relationship("Program", back_populates="users", lazy="selectin")
     notes = relationship("Note", back_populates="user")
     summaries = relationship("Summary", back_populates="user")

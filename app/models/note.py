@@ -39,5 +39,6 @@ class Note(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    user = relationship("User", back_populates="notes")
-    subject = relationship("Subject", back_populates="notes")
+    user = relationship("User", back_populates="notes", lazy="selectin")
+    subject = relationship("Subject", back_populates="notes", lazy="selectin")
+    feedback = relationship("NoteFeedback", back_populates="note", cascade="all, delete-orphan", uselist=False, lazy="selectin")

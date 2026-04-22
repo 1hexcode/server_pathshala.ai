@@ -172,6 +172,20 @@ class SubjectResponse(BaseModel):
         from_attributes = True
 
 
+# ─── Note Feedback ─────────────────────────────────────────────────────────────
+
+class NoteFeedbackResponse(BaseModel):
+    id: UUID
+    admin_id: UUID
+    feedback_text: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class NoteRejectRequest(BaseModel):
+    feedback_text: str
+
 # ─── Note ────────────────────────────────────────────────────────────────────
 
 class NoteResponse(BaseModel):
@@ -189,6 +203,7 @@ class NoteResponse(BaseModel):
     views: int
     tags: Optional[List[str]] = None
     created_at: datetime
+    feedback: Optional[NoteFeedbackResponse] = None
 
     class Config:
         from_attributes = True

@@ -17,7 +17,8 @@ from app.models.note import Note
 from app.models.subject import Subject
 from app.models.program import Program
 from app.models.college import College
-from app.schemas import NoteResponse
+from app.models.note_feedback import NoteFeedback
+from app.schemas import NoteResponse, NoteRejectRequest
 from app.services.storage_service import storage_service
 from app.services.ocr_service import ocr_service
 from app.core.config import settings
@@ -166,7 +167,7 @@ async def list_notes(
     db: AsyncSession = Depends(get_db),
 ):
     """List all notes, optionally filtered by subject (public)."""
-    query = select(Note).where(Note.status == "ready")
+    query = select(Note).options(selectinload(Note.feedback)).where(Note.status == "ready")
     if subject_id:
         query = query.where(Note.subject_id == subject_id)
     query = query.order_by(Note.created_at.desc())
@@ -183,7 +184,7 @@ async def list_pending_notes(
     db: AsyncSession = Depends(get_db),
 ):
     """List all notes waiting for review. Admins only see notes for their college."""
-    query = select(Note).where(Note.status == "pending")
+    query = select(Note).options(selectinload(Note.feedback)).where(Note.status == "pending")
 
     if current_user.role == "admin":
         if current_user.college_id is None:
@@ -203,7 +204,7 @@ async def get_note(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single note by ID (public). Increments view count."""
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    result = await db.execute(select(Note).options(selectinload(Note.feedback)).where(Note.id == note_id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -340,11 +341,12 @@ async def publish_note(
 @router.patch("/{note_id}/reject", response_model=NoteResponse)
 async def reject_note(
     note_id: str,
+    payload: NoteRejectRequest,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reject a pending note. Admins can only reject notes in their college."""
-    result = await db.execute(select(Note).where(Note.id == note_id))
+    """Reject a pending note with feedback. Admins can only reject notes in their college."""
+    result = await db.execute(select(Note).options(selectinload(Note.feedback)).where(Note.id == note_id))
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -356,6 +358,17 @@ async def reject_note(
             raise HTTPException(status_code=403, detail="You can only manage notes from your own college.")
 
     note.status = "failed"
+    
+    # Store feedback
+    feedback = NoteFeedback(
+        note_id=note.id,
+        admin_id=current_user.id,
+        feedback_text=payload.feedback_text
+    )
+    db.add(feedback)
+    await db.flush()
+    await db.refresh(note, attribute_names=["feedback"])
+    
     logger.info(f"Note rejected by {current_user.email}: {note.title}")
     return note
 

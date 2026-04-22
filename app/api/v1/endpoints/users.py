@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -52,7 +53,7 @@ async def register_user(
     )
     db.add(user)
     await db.flush()
-    await db.refresh(user)
+    await db.refresh(user, attribute_names=["college", "program"])
 
     token = create_access_token(str(user.id), user.role)
     logger.info(f"New student registered: {user.email}")
@@ -66,7 +67,11 @@ async def login_user(
     db: AsyncSession = Depends(get_db),
 ):
     """Login and receive a JWT token."""
-    result = await db.execute(select(User).where(User.email == data.email))
+    result = await db.execute(
+        select(User)
+        .where(User.email == data.email)
+        .options(selectinload(User.college), selectinload(User.program))
+    )
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(data.password, user.password_hash):
@@ -198,7 +203,7 @@ async def create_admin(
     )
     db.add(user)
     await db.flush()
-    await db.refresh(user)
+    await db.refresh(user, attribute_names=["college", "program"])
 
     college_info = f" (college: {college_id})" if college_id else ""
     logger.info(f"Admin created by {current_user.email}: {user.email} ({user.role}){college_info}")

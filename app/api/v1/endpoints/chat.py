@@ -134,8 +134,9 @@ async def chat_about_note(
         chat_log = AIChatLog(
             user_id=current_user.id,
             note_id=note.id,
-            question=body.message,
-            platform=config.get("platform", "unknown"),
+            message=body.message,
+            response=response_text.strip(),
+            model_used=config.get("display_name", config.get("model", "unknown")),
         )
         db.add(chat_log)
 
